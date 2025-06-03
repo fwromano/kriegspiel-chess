@@ -284,6 +284,17 @@
                 this.gameOver = false;
                 this.refereeMode = false; // Toggle to see both sides
                 
+                // Track castling rights and game state
+                this.castlingRights = {
+                    whiteKingside: true,
+                    whiteQueenside: true,
+                    blackKingside: true,
+                    blackQueenside: true
+                };
+                this.enPassantTarget = null; // Square where en passant capture is possible
+                this.halfmoveClock = 0; // For 50-move rule
+                this.fullmoveNumber = 1;
+                
                 this.renderBoard();
                 this.updateStatus();
             }
@@ -406,9 +417,40 @@
                     return;
                 }
                 
-                // Make the move
-                this.board[to.row][to.col] = piece;
-                this.board[from.row][from.col] = null;
+                // Handle special moves
+                let specialMove = '';
+                let enPassantCapture = false;
+                
+                // Check for castling
+                if (piece.toLowerCase() === 'k' && Math.abs(to.col - from.col) === 2) {
+                    this.performCastling(from, to);
+                    specialMove = 'Castling!';
+                }
+                // Check for en passant
+                else if (piece.toLowerCase() === 'p' && this.enPassantTarget && 
+                         to.row === this.enPassantTarget.row && to.col === this.enPassantTarget.col) {
+                    this.performEnPassant(from, to);
+                    enPassantCapture = true;
+                    specialMove = 'En passant capture!';
+                }
+                // Normal move
+                else {
+                    this.board[to.row][to.col] = piece;
+                    this.board[from.row][from.col] = null;
+                }
+                
+                // Update castling rights
+                this.updateCastlingRights(piece, from);
+                
+                // Update en passant target
+                this.updateEnPassantTarget(piece, from, to);
+                
+                // Update halfmove clock
+                if (piece.toLowerCase() === 'p' || captured || enPassantCapture) {
+                    this.halfmoveClock = 0;
+                } else {
+                    this.halfmoveClock++;
+                }
                 
                 this.lastMove = {from, to};
                 this.lastMoveWasWhite = isWhiteMove;
@@ -423,16 +465,24 @@
                 
                 // Switch turns
                 this.currentPlayer = this.currentPlayer === 'white' ? 'black' : 'white';
+                if (this.currentPlayer === 'white') {
+                    this.fullmoveNumber++;
+                }
                 
                 // REFEREE ANNOUNCEMENTS - Always announced regardless of who moved
                 let announcements = [];
                 
-                // 1. Capture announcement (always announced)
-                if (captured) {
+                // 1. Special move announcements
+                if (specialMove) {
+                    announcements.push(specialMove);
+                }
+                
+                // 2. Capture announcement (always announced)
+                if (captured || enPassantCapture) {
                     announcements.push('Capture!');
                 }
                 
-                // 2. Check announcement (always announced)
+                // 3. Check/checkmate/stalemate announcement
                 if (this.isInCheck(this.currentPlayer)) {
                     if (this.isCheckmate(this.currentPlayer)) {
                         announcements.push('Checkmate!');
@@ -440,9 +490,15 @@
                     } else {
                         announcements.push('Check!');
                     }
+                } else if (this.isStalemate(this.currentPlayer)) {
+                    announcements.push('Stalemate!');
+                    this.gameOver = true;
+                } else if (this.halfmoveClock >= 100) { // 50-move rule
+                    announcements.push('Draw by 50-move rule!');
+                    this.gameOver = true;
                 }
                 
-                // 3. Pawn promotion announcement
+                // 4. Pawn promotion announcement
                 if (piece.toLowerCase() === 'p' && (to.row === 0 || to.row === 7)) {
                     // Auto-promote to queen for simplicity
                     this.board[to.row][to.col] = piece === 'P' ? 'Q' : 'q';
@@ -454,11 +510,11 @@
                     const mainAnnouncement = announcements[0];
                     const allAnnouncements = announcements.join(' ');
                     
-                    if (mainAnnouncement === 'Checkmate!') {
+                    if (allAnnouncements.includes('Checkmate!') || allAnnouncements.includes('Stalemate!') || allAnnouncements.includes('Draw')) {
                         this.showFeedback('checkmate', allAnnouncements);
-                    } else if (mainAnnouncement === 'Check!') {
+                    } else if (allAnnouncements.includes('Check!')) {
                         this.showFeedback('check', allAnnouncements);
-                    } else if (mainAnnouncement === 'Capture!') {
+                    } else if (allAnnouncements.includes('Capture!')) {
                         this.showFeedback('capture', allAnnouncements);
                     } else {
                         this.showFeedback('legal', allAnnouncements);
@@ -734,7 +790,15 @@
                         return ((rowDiff === 0 || colDiff === 0) || (absRowDiff === absColDiff)) && 
                                absRowDiff + absColDiff > 0 && this.isPathClear(from, to);
                     case 'k': // King
-                        return absRowDiff <= 1 && absColDiff <= 1 && (absRowDiff + absColDiff > 0);
+                        // Normal king move
+                        if (absRowDiff <= 1 && absColDiff <= 1 && (absRowDiff + absColDiff > 0)) {
+                            return true;
+                        }
+                        // Castling
+                        if (absRowDiff === 0 && absColDiff === 2) {
+                            return this.canCastle(from, to, isWhite);
+                        }
+                        return false;
                     default:
                         return false;
                 }
@@ -757,10 +821,170 @@
                 
                 // Diagonal captures
                 if (Math.abs(colDiff) === 1 && rowDiff === direction) {
-                    return this.board[to.row][to.col] !== null; // Must capture something
+                    // Normal capture
+                    if (this.board[to.row][to.col] !== null) {
+                        return true;
+                    }
+                    // En passant capture
+                    if (this.enPassantTarget && 
+                        to.row === this.enPassantTarget.row && to.col === this.enPassantTarget.col) {
+                        return true;
+                    }
                 }
                 
                 return false;
+            }
+
+            canCastle(from, to, isWhite) {
+                // Check if king is in starting position
+                if (from.row !== (isWhite ? 7 : 0) || from.col !== 4) {
+                    return false;
+                }
+                
+                // Check if king is in check
+                if (this.isInCheck(isWhite ? 'white' : 'black')) {
+                    return false;
+                }
+                
+                const isKingside = to.col === 6;
+                const isQueenside = to.col === 2;
+                
+                if (isKingside) {
+                    // Check kingside castling rights
+                    if (!this.castlingRights[isWhite ? 'whiteKingside' : 'blackKingside']) {
+                        return false;
+                    }
+                    
+                    // Check if path is clear (f1/f8 and g1/g8)
+                    if (this.board[from.row][5] !== null || this.board[from.row][6] !== null) {
+                        return false;
+                    }
+                    
+                    // Check if rook is in place
+                    const rookSquare = this.board[from.row][7];
+                    if (!rookSquare || rookSquare.toLowerCase() !== 'r') {
+                        return false;
+                    }
+                    
+                    // Check if king passes through check
+                    return !this.wouldKingBeInCheck(from, {row: from.row, col: 5}, isWhite) &&
+                           !this.wouldKingBeInCheck(from, {row: from.row, col: 6}, isWhite);
+                           
+                } else if (isQueenside) {
+                    // Check queenside castling rights
+                    if (!this.castlingRights[isWhite ? 'whiteQueenside' : 'blackQueenside']) {
+                        return false;
+                    }
+                    
+                    // Check if path is clear (d1/d8, c1/c8, and b1/b8)
+                    if (this.board[from.row][3] !== null || this.board[from.row][2] !== null || this.board[from.row][1] !== null) {
+                        return false;
+                    }
+                    
+                    // Check if rook is in place
+                    const rookSquare = this.board[from.row][0];
+                    if (!rookSquare || rookSquare.toLowerCase() !== 'r') {
+                        return false;
+                    }
+                    
+                    // Check if king passes through check
+                    return !this.wouldKingBeInCheck(from, {row: from.row, col: 3}, isWhite) &&
+                           !this.wouldKingBeInCheck(from, {row: from.row, col: 2}, isWhite);
+                }
+                
+                return false;
+            }
+
+            wouldKingBeInCheck(from, to, isWhite) {
+                // Temporarily move king to test for check
+                const originalPiece = this.board[to.row][to.col];
+                const king = this.board[from.row][from.col];
+                
+                this.board[to.row][to.col] = king;
+                this.board[from.row][from.col] = null;
+                
+                const inCheck = this.isInCheck(isWhite ? 'white' : 'black');
+                
+                // Restore board
+                this.board[from.row][from.col] = king;
+                this.board[to.row][to.col] = originalPiece;
+                
+                return inCheck;
+            }
+
+            performCastling(from, to) {
+                const isWhite = this.board[from.row][from.col] === 'K';
+                const isKingside = to.col === 6;
+                
+                // Move king
+                this.board[to.row][to.col] = this.board[from.row][from.col];
+                this.board[from.row][from.col] = null;
+                
+                // Move rook
+                if (isKingside) {
+                    this.board[from.row][5] = this.board[from.row][7];
+                    this.board[from.row][7] = null;
+                } else {
+                    this.board[from.row][3] = this.board[from.row][0];
+                    this.board[from.row][0] = null;
+                }
+            }
+
+            performEnPassant(from, to) {
+                const piece = this.board[from.row][from.col];
+                const isWhite = piece === 'P';
+                
+                // Move pawn
+                this.board[to.row][to.col] = piece;
+                this.board[from.row][from.col] = null;
+                
+                // Remove captured pawn
+                const capturedPawnRow = isWhite ? to.row + 1 : to.row - 1;
+                this.board[capturedPawnRow][to.col] = null;
+            }
+
+            updateCastlingRights(piece, from) {
+                // If king moves, lose both castling rights
+                if (piece.toLowerCase() === 'k') {
+                    if (piece === 'K') {
+                        this.castlingRights.whiteKingside = false;
+                        this.castlingRights.whiteQueenside = false;
+                    } else {
+                        this.castlingRights.blackKingside = false;
+                        this.castlingRights.blackQueenside = false;
+                    }
+                }
+                
+                // If rook moves from corner, lose that side's castling
+                if (piece.toLowerCase() === 'r') {
+                    if (from.row === 7 && from.col === 0) {
+                        this.castlingRights.whiteQueenside = false;
+                    } else if (from.row === 7 && from.col === 7) {
+                        this.castlingRights.whiteKingside = false;
+                    } else if (from.row === 0 && from.col === 0) {
+                        this.castlingRights.blackQueenside = false;
+                    } else if (from.row === 0 && from.col === 7) {
+                        this.castlingRights.blackKingside = false;
+                    }
+                }
+            }
+
+            updateEnPassantTarget(piece, from, to) {
+                // Clear previous en passant target
+                this.enPassantTarget = null;
+                
+                // Set new en passant target if pawn moved two squares
+                if (piece.toLowerCase() === 'p' && Math.abs(to.row - from.row) === 2) {
+                    this.enPassantTarget = {
+                        row: (from.row + to.row) / 2,
+                        col: from.col
+                    };
+                }
+            }
+
+            isStalemate(player) {
+                // Not in check but no legal moves
+                return !this.isInCheck(player) && this.getAllPossibleMoves(player).length === 0;
             }
 
             isPathClear(from, to) {
@@ -896,6 +1120,7 @@
 
         function newGame() {
             game = new KriegspielChess();
+            game.showFeedback('legal', 'New game started!');
         }
 
         function askForTries() {
